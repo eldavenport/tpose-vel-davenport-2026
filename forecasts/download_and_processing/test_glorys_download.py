@@ -5,7 +5,7 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from glorys_download import (
+from forecasts.download_and_processing.glorys_download import (
     parse_date,
     lon_360_to_180,
     get_cmems_vars,

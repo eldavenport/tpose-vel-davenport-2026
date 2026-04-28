@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
-from hycom_download import (
+from forecasts.download_and_processing.hycom_download import (
     parse_date,
     get_hycom_vars,
     get_monthly_ranges,

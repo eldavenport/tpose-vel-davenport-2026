@@ -32,7 +32,7 @@ from pathlib import Path
 # Allow running from the repo root or from within forecasts/
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from forecasts.glorys_download import download_glorys
+from forecasts.download_and_processing.glorys_download import download_glorys
 
 
 def parse_args() -> argparse.Namespace:

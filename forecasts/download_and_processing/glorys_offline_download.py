@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path("__file__").resolve().parent))
 
-from forecasts.glorys_download import download_glorys
+from forecasts.download_and_processing.glorys_download import download_glorys
 
 OUTPUT_DIR = '/data/SO3/edavenport/tpose6/glorys_T_data'
 
