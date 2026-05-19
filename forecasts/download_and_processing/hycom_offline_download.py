@@ -27,8 +27,8 @@ DEPTH_MIN_POS = 0.0
 DEPTH_MAX_POS = 500.0
 VARIABLES     = ["water_temp"]
 DEPTH_VARS    = {"water_temp"}
-TIME_START    = date(2013, 10, 1)
-TIME_END      = date(2013, 12, 31)
+TIME_START    = date(2012, 9, 1)
+TIME_END      = date(2013, 9, 30)
 CHUNK_DAYS    = 2   # ~0.9 GB/request; keeps well under server truncation limit
 THREDDS_BASE  = "https://tds.hycom.org/thredds/dodsC/GLBv0.08/expt_53.X/data/{year}"
 
