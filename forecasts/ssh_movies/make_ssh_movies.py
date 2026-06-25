@@ -211,19 +211,35 @@ for win_start in WINDOWS:
     ne = extract_etan(open_tpose(p.noTAO_data_dir, p), p)
     print(f'    shape: {ne[2].shape}')
 
-    print(f'  Loading noVel forecast: {p.noTAO_forecast_data_dir}')
-    nf = extract_etan(open_tpose(p.noTAO_forecast_data_dir, p), p)
+    vel_est_dir = VEL_EST_DIRS.get(win_start)
+    if vel_est_dir:
+        print(f'  Loading vel estimate: {vel_est_dir}')
+        ve = extract_etan(open_tpose(vel_est_dir, p), p)
+    else:
+        ve = None
+        print('  vel estimate: not available for this window')
 
-    print(f'  Loading vel forecast: {p.vel_forecast_data_dir}')
-    vf = extract_etan(open_tpose(p.vel_forecast_data_dir, p), p)
+    print('  Loading GLORYS ...')
+    gl = extract_glorys(win_start, p.end_date, p)
+    if gl is None:
+        print('    GLORYS: no data for this window')
 
-    # Forecasts movie: AVISO + forecasts
-    print('  Generating forecasts movie ...')
-    make_movie(
-        [av, nf, vf],
-        ['AVISO', 'TPOSE-noVel Fct.', 'TPOSE-Vel Fct.'],
-        dates_str,
-        os.path.join(OUT_DIR, f'{label}_forecasts.mp4'),
-    )
+    print('  Loading HYCOM ...')
+    hy = extract_hycom(win_start, p.end_date, p)
+    if hy is None:
+        print('    HYCOM: no data for this window')
+
+    # Estimates movie: AVISO + all state estimates + reanalyses
+    est_panels = [av, ne]
+    est_titles = ['AVISO', 'TPOSE-noVel Est.']
+    if ve is not None:
+        est_panels.append(ve); est_titles.append('TPOSE-Vel Est.')
+    if gl is not None:
+        est_panels.append(gl); est_titles.append('GLORYS')
+    if hy is not None:
+        est_panels.append(hy); est_titles.append('HYCOM')
+    print('  Generating estimates movie ...')
+    make_movie(est_panels, est_titles, dates_str,
+               os.path.join(OUT_DIR, f'{label}_estimates.mp4'))
 
 print('\nAll movies done.')
