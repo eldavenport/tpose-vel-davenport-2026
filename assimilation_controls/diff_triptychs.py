@@ -1,0 +1,264 @@
+"""Figures: (TPOSE-Vel - TPOSE-noVel) control-adjustment triptychs.
+
+Every figure has rows = [TPOSE-Vel, TPOSE-noVel, Vel - noVel]. Three axes vary:
+
+  view    'map'      lat-lon map (all 6 control vars)
+          'equator'  depth-longitude section at the equator (EUC), IC T/S
+          '140W'     depth-latitude section at 140 W, +/-10 lat, IC T/S
+          (sections clipped to the upper ~300 m)
+
+  metric  'rms'   magnitude: sqrt(mean of xx^2); sequential cmap from 0
+          'mean'  signed time/depth mean of xx; diverging balance cmap
+
+  span    per-season -> columns = Sep/Nov/Jan/Mar
+          all-season -> single column aggregated across the 4 seasons
+                        (rms -> sqrt(mean of squares), mean -> mean)
+
+Map reductions: atmos over 'time', IC T/S over upper-300 m 'Z'. Per-season
+sections are instantaneous IC slices (signed); the rms/mean distinction only
+applies to the all-season aggregate.
+
+Self-contained (own data loads, current paths from tiw-controls/tiw.py).
+Run: ~/miniforge3/envs/tpose/bin/python diff_triptychs.py
+"""
+import os
+import warnings
+warnings.filterwarnings('ignore')
+
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+import cmocean
+import cartopy.crs as ccrs
+import cartopy.feature as cfeature
+from mitgcm_assim.ctrls import load_controls_and_sensitivities
+
+GRID = '/data/SO6/TPOSE_diags/tpose6/grid_6/'
+VEL = {'Sep': ('/data/SO3/edavenport/tpose6/diags/sep2012/run_iter14', 14),
+       'Nov': ('/data/SO3/edavenport/tpose6/diags/nov2012/run_iter20', 20),
+       'Jan': ('/data/SO3/edavenport/tpose6/diags/jan2013/run_iter14', 14),
+       'Mar': ('/data/SO3/edavenport/tpose6/diags/mar2013/run_iter16', 16)}
+NOVEL = {'Sep': ('/data/SO6/TPOSE/tpose6/sep2012/ITER7/', 7),
+         'Nov': ('/data/SO6/TPOSE/tpose6/nov2012/ITER4/', 4),
+         'Jan': ('/data/SO6/TPOSE/tpose6/jan2013/ITER7/', 7),
+         'Mar': ('/data/SO6/TPOSE/tpose6/mar2013/ITER4/', 4)}
+SEASONS = ['Sep', 'Nov', 'Jan', 'Mar']
+ZTOP = slice(0, 39)   # upper ~300 m
+
+# var: (label, sequential cmap for rms rows, kind)  -- atmos has time, ic has Z
+MAP_VARS = {
+    'xx_precip': ('Precip.',         cmocean.cm.rain,    'atmos'),
+    'xx_uwind':  ('U Wind',          cmocean.cm.speed,   'atmos'),
+    'xx_vwind':  ('V Wind',          cmocean.cm.speed,   'atmos'),
+    'xx_swdown': ('Shortwave Rad.',  cmocean.cm.solar,   'atmos'),
+    'xx_theta':  ('Initial T (0-300 m)', cmocean.cm.thermal, 'ic'),
+    'xx_salt':   ('Initial S (0-300 m)', cmocean.cm.haline,  'ic'),
+}
+SECT_VARS = {
+    'xx_theta': ('Initial T', cmocean.cm.thermal),
+    'xx_salt':  ('Initial S', cmocean.cm.haline),
+}
+DIFF_CMAP = cmocean.cm.balance
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+tao = [tuple(map(float, l.split()))
+       for l in open(os.path.join(HERE, '..', 'tao_moorings.txt'))
+       if l.strip() and not l.strip().startswith('#')]
+HILITE = {(220, 0), (190, 0), (250, 0)}
+PROJ = ccrs.PlateCarree(central_longitude=180)
+
+
+def load(table):
+    want = set(MAP_VARS) | set(SECT_VARS)
+    out = {}
+    for s, (d, it) in table.items():
+        ds = load_controls_and_sensitivities(d, GRID, it)
+        out[s] = ds[[v for v in ds.data_vars if str(v) in want]]
+    return out
+
+
+def near(coord, target):
+    # MITgcm coords are big-endian -> cast before pandas sees them.
+    return int(np.abs(np.asarray(coord.values, dtype='f8') - target).argmin())
+
+
+def season_field(ds, var, view, metric):
+    """2D field for one season/variable/view."""
+    da = ds[var]
+    if view == 'map':
+        base = da.isel(Z=ZTOP) if 'Z' in da.dims else da
+        dim = 'Z' if 'Z' in da.dims else 'time'
+        return np.sqrt((base ** 2).mean(dim)) if metric == 'rms' else base.mean(dim)
+    if view == 'equator':
+        return da.isel(Z=ZTOP, YC=near(da.YC, 0.0))
+    if view == '140W':
+        jlo, jhi = near(da.YC, -10.0), near(da.YC, 10.0)
+        return da.isel(Z=ZTOP, XC=near(da.XC, 220.0),
+                       YC=slice(min(jlo, jhi), max(jlo, jhi) + 1))
+
+
+def aggregate(fields, metric):
+    """Collapse a list of same-grid DataArrays across seasons."""
+    arr = np.stack([f.values for f in fields], axis=0)
+    agg = np.sqrt(np.nanmean(arr ** 2, 0)) if metric == 'rms' else np.nanmean(arr, 0)
+    return fields[0].copy(data=agg)
+
+
+def p98(a):
+    return float(np.nanpercentile(a, 98))
+
+
+# --------------------------------------------------------------- panels
+def map_panel(fig, sub, da, cmap, vmin, vmax, col_title, row_label, left, bottom):
+    ax = fig.add_subplot(sub, projection=PROJ)
+    ax.set_aspect('auto')
+    ax.add_feature(cfeature.COASTLINE, linewidth=0.8, edgecolor='black')
+    ax.add_feature(cfeature.LAND, facecolor='lightgray', zorder=1)
+    ax.set_extent([float(da.XC.min()), float(da.XC.max()), -17, 17],
+                  crs=ccrs.PlateCarree())
+    im = da.plot(ax=ax, add_colorbar=False, cmap=cmap, vmin=vmin, vmax=vmax,
+                 transform=ccrs.PlateCarree(), x='XC', y='YC')
+    for lon, lat in tao:
+        ax.plot(lon, lat, marker='o',
+                color='red' if (lon, lat) in HILITE else 'white',
+                markersize=4, markeredgecolor='black', markeredgewidth=0.5,
+                transform=ccrs.PlateCarree(), zorder=5)
+    gl = ax.gridlines(draw_labels=True, linewidth=0.3, color='gray',
+                      alpha=0.5, linestyle='--', crs=ccrs.PlateCarree())
+    gl.left_labels, gl.bottom_labels = left, bottom
+    gl.right_labels = gl.top_labels = False
+    gl.xlabel_style = gl.ylabel_style = {'size': 11}
+    _titles(ax, col_title, row_label)
+    return im
+
+
+def section_panel(fig, sub, da, xdim, cmap, vmin, vmax, col_title, row_label,
+                  left, bottom):
+    ax = fig.add_subplot(sub)
+    im = da.plot(ax=ax, x=xdim, y='Z', cmap=cmap, vmin=vmin, vmax=vmax,
+                 add_colorbar=False)
+    ax.set_ylim(-315, 0)
+    ax.axvline(220 if xdim == 'XC' else 0, color='k', ls='--', lw=0.6, alpha=0.5)
+    ax.set_ylabel('Depth (m)' if left else '')
+    if not left:
+        ax.set_yticklabels([])
+    ax.set_xlabel(('Longitude ($^\\circ$E)' if xdim == 'XC' else 'Latitude')
+                  if bottom else '')
+    if not bottom:
+        ax.set_xticklabels([])
+    _titles(ax, col_title, row_label, transax=True)
+    return im
+
+
+def _titles(ax, col_title, row_label, transax=False):
+    ax.set_title(col_title if col_title else '', fontsize=14, fontweight='bold')
+    if row_label:
+        ax.text(0.02, 0.97, row_label, transform=ax.transAxes, fontsize=12,
+                fontweight='bold', va='top', ha='left',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                          alpha=1.0, edgecolor='gray', linewidth=0.5))
+
+
+# --------------------------------------------------------------- renderer
+VIEW_CFG = {  # per-column width, fig height, (hspace, wspace), x-dim
+    'map':     (4.0, 7.5, (0.12, 0.15), 'XC'),
+    'equator': (3.9, 8.0, (0.30, 0.18), 'XC'),
+    '140W':    (2.4, 8.5, (0.30, 0.22), 'YC'),
+}
+
+
+def render(view, var, label, cmap, metric, magnitude, col_labels, V, N, outname):
+    D = {c: V[c] - N[c] for c in col_labels}
+    dmax = max(p98(np.abs(D[c].values)) for c in col_labels) or 1e-9
+    if magnitude:
+        vmax = max(p98(V[c].values) for c in col_labels)
+        vmax = max(vmax, max(p98(N[c].values) for c in col_labels), 1e-9)
+        row_lim, row_cmap = (0, vmax), cmap
+        top_cb = 'RMS adjustment\n(units of $\\sigma$)'
+        metric_word = 'RMS'
+    else:
+        amax = max(max(p98(np.abs(V[c].values)), p98(np.abs(N[c].values)))
+                   for c in col_labels) or 1e-9
+        row_lim, row_cmap = (-amax, amax), DIFF_CMAP
+        top_cb = 'mean adjustment\n(units of $\\sigma$)'
+        metric_word = 'mean'
+
+    rows = [('TPOSE-Vel', V, *row_lim, row_cmap),
+            ('TPOSE-noVel', N, *row_lim, row_cmap),
+            ('Vel $-$ noVel', D, -dmax, dmax, DIFF_CMAP)]
+
+    percol, figh, (hs, ws), xdim = VIEW_CFG[view]
+    nc = len(col_labels)
+    fig = plt.figure(figsize=(percol * nc + 1.2, figh))
+    gs = gridspec.GridSpec(3, nc + 1, width_ratios=[1] * nc + [0.04],
+                           wspace=ws, hspace=hs)
+    for r, (rlab, fields, vmin, vmax, cm) in enumerate(rows):
+        for c, lab in enumerate(col_labels):
+            args = dict(col_title=lab if r == 0 else None,
+                        row_label=rlab if c == 0 else None,
+                        left=(c == 0), bottom=(r == 2))
+            if view == 'map':
+                im = map_panel(fig, gs[r, c], fields[lab], cm, vmin, vmax, **args)
+            else:
+                im = section_panel(fig, gs[r, c], fields[lab], xdim, cm,
+                                   vmin, vmax, **args)
+        if r == 0:
+            fig.colorbar(im, cax=fig.add_subplot(gs[0:2, nc]), label=top_cb)
+        if r == 2:
+            fig.colorbar(im, cax=fig.add_subplot(gs[2, nc]),
+                         label='Vel $-$ noVel\n($\\sigma$)')
+    where = {'map': '', 'equator': ' along the equator',
+             '140W': ' at 140$^\\circ$W'}[view]
+    fig.suptitle(f'{label} control adjustment ({metric_word}){where}: '
+                 f'TPOSE-Vel, TPOSE-noVel, and difference', y=1.00, fontsize=15)
+    out = os.path.join(HERE, outname)
+    plt.savefig(out, dpi=150, bbox_inches='tight')
+    plt.close()
+    return outname
+
+
+def fields_for(view, var, metric, vel, nov, per_season):
+    if per_season:
+        cols = SEASONS
+        V = {s: season_field(vel[s], var, view, metric) for s in SEASONS}
+        N = {s: season_field(nov[s], var, view, metric) for s in SEASONS}
+    else:
+        cols = ['All seasons']
+        V = {'All seasons': aggregate(
+            [season_field(vel[s], var, view, metric) for s in SEASONS], metric)}
+        N = {'All seasons': aggregate(
+            [season_field(nov[s], var, view, metric) for s in SEASONS], metric)}
+    return cols, V, N
+
+
+if __name__ == '__main__':
+    print('loading Vel...');   vel = load(VEL)
+    print('loading noVel...'); nov = load(NOVEL)
+
+    # ---- maps: per-season and all-season, both metrics
+    for metric in ('rms', 'mean'):
+        for var, (label, cmap, kind) in MAP_VARS.items():
+            for per in (True, False):
+                cols, V, N = fields_for('map', var, metric, vel, nov, per)
+                suffix = '' if per else '_allseason'
+                out = f'diff_{metric}_triptych_{var}{suffix}.png'
+                print('map', metric, var, 'per_season' if per else 'allseason')
+                render('map', var, label, cmap, metric, metric == 'rms',
+                       cols, V, N, out)
+
+    # ---- sections: per-season (signed slice) + all-season (both metrics)
+    for view in ('equator', '140W'):
+        for var, (label, cmap) in SECT_VARS.items():
+            # per-season instantaneous IC slices (signed)
+            cols, V, N = fields_for(view, var, 'mean', vel, nov, True)
+            print('section', view, var, 'per_season')
+            render(view, var, label, cmap, 'mean', False, cols, V, N,
+                   f'diff_{view}_section_{var}.png')
+            # all-season aggregate, both metrics
+            for metric in ('rms', 'mean'):
+                cols, V, N = fields_for(view, var, metric, vel, nov, False)
+                print('section', view, var, 'allseason', metric)
+                render(view, var, label, cmap, metric, metric == 'rms',
+                       cols, V, N,
+                       f'diff_{view}_section_{var}_{metric}_allseason.png')
+    print('done')
