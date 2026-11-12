@@ -28,6 +28,9 @@ warnings.filterwarnings('ignore')
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
+from matplotlib.ticker import MaxNLocator
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize
 import cmocean
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -39,7 +42,9 @@ VEL = {'Sep': ('/data/SO3/edavenport/tpose6/diags/sep2012/run_iter14', 14),
        'Jan': ('/data/SO3/edavenport/tpose6/diags/jan2013/run_iter14', 14),
        'Mar': ('/data/SO3/edavenport/tpose6/diags/mar2013/run_iter16', 16)}
 NOVEL = {'Sep': ('/data/SO6/TPOSE/tpose6/sep2012/ITER7/', 7),
-         'Nov': ('/data/SO6/TPOSE/tpose6/nov2012/ITER4/', 4),
+         # ITER11 (averdy's more-converged run, completed 2026-11-11 ~15:04).
+         # The earlier under-converged ITER4 is archived at nov2012/old/ITER4.
+         'Nov': ('/data/SO6/TPOSE/tpose6/nov2012/ITER11/', 11),
          'Jan': ('/data/SO6/TPOSE/tpose6/jan2013/ITER7/', 7),
          'Mar': ('/data/SO6/TPOSE/tpose6/mar2013/ITER4/', 4)}
 SEASONS = ['Sep', 'Nov', 'Jan', 'Mar']
@@ -61,6 +66,8 @@ SECT_VARS = {
 DIFF_CMAP = cmocean.cm.balance
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+OUTDIR = os.path.join(HERE, 'vel_minus_novel')
+os.makedirs(OUTDIR, exist_ok=True)
 tao = [tuple(map(float, l.split()))
        for l in open(os.path.join(HERE, '..', 'tao_moorings.txt'))
        if l.strip() and not l.strip().startswith('#')]
@@ -68,12 +75,19 @@ HILITE = {(220, 0), (190, 0), (250, 0)}
 PROJ = ccrs.PlateCarree(central_longitude=180)
 
 
-def load(table):
+def load(table, tries=4):
     want = set(MAP_VARS) | set(SECT_VARS)
     out = {}
     for s, (d, it) in table.items():
-        ds = load_controls_and_sensitivities(d, GRID, it)
-        out[s] = ds[[v for v in ds.data_vars if str(v) in want]]
+        for k in range(tries):
+            ds = load_controls_and_sensitivities(d, GRID, it)
+            sub = ds[[v for v in ds.data_vars if str(v) in want]]
+            # grid read is flaky under load; retry if vars or coords missing
+            if sub.data_vars and 'XC' in sub.coords:
+                break
+        else:
+            raise RuntimeError(f'empty/gridless load after {tries} tries: {d}')
+        out[s] = sub
     return out
 
 
@@ -116,8 +130,9 @@ def map_panel(fig, sub, da, cmap, vmin, vmax, col_title, row_label, left, bottom
     ax.add_feature(cfeature.LAND, facecolor='lightgray', zorder=1)
     ax.set_extent([float(da.XC.min()), float(da.XC.max()), -17, 17],
                   crs=ccrs.PlateCarree())
-    im = da.plot(ax=ax, add_colorbar=False, cmap=cmap, vmin=vmin, vmax=vmax,
-                 transform=ccrs.PlateCarree(), x='XC', y='YC')
+    im = da.plot.contourf(ax=ax, add_colorbar=False, cmap=cmap,
+                          levels=np.linspace(vmin, vmax, 21), extend='both',
+                          transform=ccrs.PlateCarree(), x='XC', y='YC')
     for lon, lat in tao:
         ax.plot(lon, lat, marker='o',
                 color='red' if (lon, lat) in HILITE else 'white',
@@ -135,8 +150,9 @@ def map_panel(fig, sub, da, cmap, vmin, vmax, col_title, row_label, left, bottom
 def section_panel(fig, sub, da, xdim, cmap, vmin, vmax, col_title, row_label,
                   left, bottom):
     ax = fig.add_subplot(sub)
-    im = da.plot(ax=ax, x=xdim, y='Z', cmap=cmap, vmin=vmin, vmax=vmax,
-                 add_colorbar=False)
+    im = da.plot.contourf(ax=ax, x=xdim, y='Z', cmap=cmap,
+                          levels=np.linspace(vmin, vmax, 21), extend='both',
+                          add_colorbar=False)
     ax.set_ylim(-315, 0)
     ax.axvline(220 if xdim == 'XC' else 0, color='k', ls='--', lw=0.6, alpha=0.5)
     ax.set_ylabel('Depth (m)' if left else '')
@@ -148,6 +164,15 @@ def section_panel(fig, sub, da, xdim, cmap, vmin, vmax, col_title, row_label,
         ax.set_xticklabels([])
     _titles(ax, col_title, row_label, transax=True)
     return im
+
+
+def _cbar(fig, sub, cmap, lim, label, nbins, symmetric):
+    """Linear colorbar from a continuous Normalize so ticks are evenly spaced
+    (a contourf colorbar is discrete + extended, which squishes ticks)."""
+    sm = ScalarMappable(norm=Normalize(*lim), cmap=cmap)
+    sm.set_array([])
+    fig.colorbar(sm, cax=fig.add_subplot(sub), label=label, extend='both',
+                 ticks=MaxNLocator(nbins=nbins, symmetric=symmetric))
 
 
 def _titles(ax, col_title, row_label, transax=False):
@@ -174,14 +199,12 @@ def render(view, var, label, cmap, metric, magnitude, col_labels, V, N, outname)
         vmax = max(p98(V[c].values) for c in col_labels)
         vmax = max(vmax, max(p98(N[c].values) for c in col_labels), 1e-9)
         row_lim, row_cmap = (0, vmax), cmap
-        top_cb = 'RMS adjustment\n(units of $\\sigma$)'
-        metric_word = 'RMS'
+        top_cb = f'{label} RMS adjustment\n(units of $\\sigma$)'
     else:
         amax = max(max(p98(np.abs(V[c].values)), p98(np.abs(N[c].values)))
                    for c in col_labels) or 1e-9
         row_lim, row_cmap = (-amax, amax), DIFF_CMAP
-        top_cb = 'mean adjustment\n(units of $\\sigma$)'
-        metric_word = 'mean'
+        top_cb = f'{label} mean adjustment\n(units of $\\sigma$)'
 
     rows = [('TPOSE-Vel', V, *row_lim, row_cmap),
             ('TPOSE-noVel', N, *row_lim, row_cmap),
@@ -202,16 +225,14 @@ def render(view, var, label, cmap, metric, magnitude, col_labels, V, N, outname)
             else:
                 im = section_panel(fig, gs[r, c], fields[lab], xdim, cm,
                                    vmin, vmax, **args)
-        if r == 0:
-            fig.colorbar(im, cax=fig.add_subplot(gs[0:2, nc]), label=top_cb)
-        if r == 2:
-            fig.colorbar(im, cax=fig.add_subplot(gs[2, nc]),
-                         label='Vel $-$ noVel\n($\\sigma$)')
-    where = {'map': '', 'equator': ' along the equator',
-             '140W': ' at 140$^\\circ$W'}[view]
-    fig.suptitle(f'{label} control adjustment ({metric_word}){where}: '
-                 f'TPOSE-Vel, TPOSE-noVel, and difference', y=1.00, fontsize=15)
-    out = os.path.join(HERE, outname)
+        if r == 0:  # spans 2 rows
+            _cbar(fig, gs[0:2, nc], row_cmap, row_lim, top_cb,
+                  nbins=5, symmetric=not magnitude)
+        if r == 2:  # 1 row tall -> fewer ticks
+            _cbar(fig, gs[2, nc], DIFF_CMAP, (-dmax, dmax),
+                  f'{label} Vel $-$ noVel\n($\\sigma$)',
+                  nbins=3, symmetric=True)
+    out = os.path.join(OUTDIR, outname)
     plt.savefig(out, dpi=150, bbox_inches='tight')
     plt.close()
     return outname
