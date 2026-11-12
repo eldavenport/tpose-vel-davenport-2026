@@ -65,6 +65,32 @@ SECT_VARS = {
 }
 DIFF_CMAP = cmocean.cm.balance
 
+# Physical units and prior-uncertainty (sigma) weight files per control.
+# Physical adjustment = xx * sigma, sigma = 1/sqrt(weight). Weight files are
+# big-endian float32 on the tpose6 grid (same sigma for both runs).
+UNITS = {'xx_theta': '$^\\circ$C', 'xx_salt': 'psu', 'xx_uwind': 'm/s',
+         'xx_vwind': 'm/s', 'xx_precip': 'm/s', 'xx_swdown': 'W/m$^2$'}
+_WDIR = '/data/SO6/TPOSE/model_setup/linked_files/TP6/'
+_WEIGHT = {  # var: (filename, is_3d)
+    'xx_theta':  ('Argo_T_wt_fac10_tp6_66.bin', True),
+    'xx_salt':   ('Argo_S_wt_fac10_tp6_66.bin', True),
+    'xx_precip': ('ERA_rain_wt_tp6.bin', False),
+    'xx_uwind':  ('ERA_u10m_wt_tp6.bin', False),
+    'xx_vwind':  ('ERA_v10m_wt_tp6.bin', False),
+    'xx_swdown': ('ERA_dsw_wt_tp6.bin', False),
+}
+_NX, _NY, _NZ = 1128, 336, 66
+
+
+def _sigma(fname, is_3d):
+    raw = np.fromfile(_WDIR + fname, dtype='>f4')
+    wt = (raw.reshape((_NX, _NY, _NZ), order='F').transpose(2, 1, 0) if is_3d
+          else raw.reshape((_NX, _NY), order='F').T)
+    return np.where(wt > 0, 1.0 / np.sqrt(wt), np.nan)   # sigma = 1/sqrt(weight)
+
+
+SIGMA = {v: _sigma(f, d3) for v, (f, d3) in _WEIGHT.items()}
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTDIR = os.path.join(HERE, 'vel_minus_novel')
 os.makedirs(OUTDIR, exist_ok=True)
@@ -96,9 +122,16 @@ def near(coord, target):
     return int(np.abs(np.asarray(coord.values, dtype='f8') - target).argmin())
 
 
-def season_field(ds, var, view, metric):
-    """2D field for one season/variable/view."""
+def base_field(ds, var, physical):
     da = ds[var]
+    if not physical:
+        return da
+    return da.copy(data=da.values * SIGMA[var])  # physical adjustment = xx*sigma
+
+
+def season_field(ds, var, view, metric, physical=False):
+    """2D field for one season/variable/view (sigma units or physical)."""
+    da = base_field(ds, var, physical)
     if view == 'map':
         base = da.isel(Z=ZTOP) if 'Z' in da.dims else da
         dim = 'Z' if 'Z' in da.dims else 'time'
@@ -186,25 +219,27 @@ def _titles(ax, col_title, row_label, transax=False):
 
 # --------------------------------------------------------------- renderer
 VIEW_CFG = {  # per-column width, fig height, (hspace, wspace), x-dim
-    'map':     (4.0, 7.5, (0.12, 0.15), 'XC'),
-    'equator': (3.9, 8.0, (0.30, 0.18), 'XC'),
-    '140W':    (2.4, 8.5, (0.30, 0.22), 'YC'),
+    # ~25% wider / shorter than square so maps read like the tropical Pacific
+    'map':     (5.0, 6.0, (0.12, 0.15), 'XC'),
+    'equator': (4.9, 6.4, (0.30, 0.18), 'XC'),
+    '140W':    (3.0, 6.8, (0.30, 0.22), 'YC'),
 }
 
 
-def render(view, var, label, cmap, metric, magnitude, col_labels, V, N, outname):
+def render(view, var, label, cmap, metric, magnitude, col_labels, V, N, outname,
+           unit='units of $\\sigma$'):
     D = {c: V[c] - N[c] for c in col_labels}
     dmax = max(p98(np.abs(D[c].values)) for c in col_labels) or 1e-9
     if magnitude:
         vmax = max(p98(V[c].values) for c in col_labels)
         vmax = max(vmax, max(p98(N[c].values) for c in col_labels), 1e-9)
         row_lim, row_cmap = (0, vmax), cmap
-        top_cb = f'{label} RMS adjustment\n(units of $\\sigma$)'
+        top_cb = f'{label} RMS adjustment\n({unit})'
     else:
         amax = max(max(p98(np.abs(V[c].values)), p98(np.abs(N[c].values)))
                    for c in col_labels) or 1e-9
         row_lim, row_cmap = (-amax, amax), DIFF_CMAP
-        top_cb = f'{label} mean adjustment\n(units of $\\sigma$)'
+        top_cb = f'{label} mean adjustment\n({unit})'
 
     rows = [('TPOSE-Vel', V, *row_lim, row_cmap),
             ('TPOSE-noVel', N, *row_lim, row_cmap),
@@ -230,7 +265,7 @@ def render(view, var, label, cmap, metric, magnitude, col_labels, V, N, outname)
                   nbins=5, symmetric=not magnitude)
         if r == 2:  # 1 row tall -> fewer ticks
             _cbar(fig, gs[2, nc], DIFF_CMAP, (-dmax, dmax),
-                  f'{label} Vel $-$ noVel\n($\\sigma$)',
+                  f'{label} Vel $-$ noVel\n({unit})',
                   nbins=3, symmetric=True)
     out = os.path.join(OUTDIR, outname)
     plt.savefig(out, dpi=150, bbox_inches='tight')
@@ -238,17 +273,16 @@ def render(view, var, label, cmap, metric, magnitude, col_labels, V, N, outname)
     return outname
 
 
-def fields_for(view, var, metric, vel, nov, per_season):
+def fields_for(view, var, metric, vel, nov, per_season, physical=False):
+    sf = lambda ds: season_field(ds, var, view, metric, physical)
     if per_season:
         cols = SEASONS
-        V = {s: season_field(vel[s], var, view, metric) for s in SEASONS}
-        N = {s: season_field(nov[s], var, view, metric) for s in SEASONS}
+        V = {s: sf(vel[s]) for s in SEASONS}
+        N = {s: sf(nov[s]) for s in SEASONS}
     else:
         cols = ['All seasons']
-        V = {'All seasons': aggregate(
-            [season_field(vel[s], var, view, metric) for s in SEASONS], metric)}
-        N = {'All seasons': aggregate(
-            [season_field(nov[s], var, view, metric) for s in SEASONS], metric)}
+        V = {'All seasons': aggregate([sf(vel[s]) for s in SEASONS], metric)}
+        N = {'All seasons': aggregate([sf(nov[s]) for s in SEASONS], metric)}
     return cols, V, N
 
 
@@ -256,30 +290,39 @@ if __name__ == '__main__':
     print('loading Vel...');   vel = load(VEL)
     print('loading noVel...'); nov = load(NOVEL)
 
-    # ---- maps: per-season and all-season, both metrics
-    for metric in ('rms', 'mean'):
-        for var, (label, cmap, kind) in MAP_VARS.items():
-            for per in (True, False):
-                cols, V, N = fields_for('map', var, metric, vel, nov, per)
-                suffix = '' if per else '_allseason'
-                out = f'diff_{metric}_triptych_{var}{suffix}.png'
-                print('map', metric, var, 'per_season' if per else 'allseason')
-                render('map', var, label, cmap, metric, metric == 'rms',
-                       cols, V, N, out)
+    # Two unit systems: sigma-normalized (xx) and physical (xx * sigma).
+    for physical in (False, True):
+        uf = '_physical' if physical else ''
+        unit = lambda var: UNITS[var] if physical else 'units of $\\sigma$'
 
-    # ---- sections: per-season (signed slice) + all-season (both metrics)
-    for view in ('equator', '140W'):
-        for var, (label, cmap) in SECT_VARS.items():
-            # per-season instantaneous IC slices (signed)
-            cols, V, N = fields_for(view, var, 'mean', vel, nov, True)
-            print('section', view, var, 'per_season')
-            render(view, var, label, cmap, 'mean', False, cols, V, N,
-                   f'diff_{view}_section_{var}.png')
-            # all-season aggregate, both metrics
-            for metric in ('rms', 'mean'):
-                cols, V, N = fields_for(view, var, metric, vel, nov, False)
-                print('section', view, var, 'allseason', metric)
-                render(view, var, label, cmap, metric, metric == 'rms',
-                       cols, V, N,
-                       f'diff_{view}_section_{var}_{metric}_allseason.png')
+        # ---- maps: per-season and all-season, both metrics
+        for metric in ('rms', 'mean'):
+            for var, (label, cmap, kind) in MAP_VARS.items():
+                for per in (True, False):
+                    cols, V, N = fields_for('map', var, metric, vel, nov, per,
+                                            physical)
+                    suffix = '' if per else '_allseason'
+                    out = f'diff_{metric}_triptych_{var}{suffix}{uf}.png'
+                    print('map', uf or 'sigma', metric, var,
+                          'per_season' if per else 'allseason')
+                    render('map', var, label, cmap, metric, metric == 'rms',
+                           cols, V, N, out, unit(var))
+
+        # ---- sections: per-season (signed slice) + all-season (both metrics)
+        for view in ('equator', '140W'):
+            for var, (label, cmap) in SECT_VARS.items():
+                cols, V, N = fields_for(view, var, 'mean', vel, nov, True,
+                                        physical)
+                print('section', uf or 'sigma', view, var, 'per_season')
+                render(view, var, label, cmap, 'mean', False, cols, V, N,
+                       f'diff_{view}_section_{var}{uf}.png', unit(var))
+                for metric in ('rms', 'mean'):
+                    cols, V, N = fields_for(view, var, metric, vel, nov, False,
+                                            physical)
+                    print('section', uf or 'sigma', view, var, 'allseason',
+                          metric)
+                    render(view, var, label, cmap, metric, metric == 'rms',
+                           cols, V, N,
+                           f'diff_{view}_section_{var}_{metric}_allseason{uf}.png',
+                           unit(var))
     print('done')
