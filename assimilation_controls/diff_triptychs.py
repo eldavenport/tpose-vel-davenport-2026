@@ -42,9 +42,9 @@ VEL = {'Sep': ('/data/SO3/edavenport/tpose6/diags/sep2012/run_iter14', 14),
        'Jan': ('/data/SO3/edavenport/tpose6/diags/jan2013/run_iter14', 14),
        'Mar': ('/data/SO3/edavenport/tpose6/diags/mar2013/run_iter16', 16)}
 NOVEL = {'Sep': ('/data/SO6/TPOSE/tpose6/sep2012/ITER7/', 7),
-         # ITER11 (averdy's more-converged run, completed 2026-11-11 ~15:04).
-         # The earlier under-converged ITER4 is archived at nov2012/old/ITER4.
-         'Nov': ('/data/SO6/TPOSE/tpose6/nov2012/ITER11/', 11),
+         # ITER17 (averdy's latest run, written 2026-11-14). Supersedes ITER11;
+         # earlier under-converged ITER4 is archived at nov2012/old/ITER4.
+         'Nov': ('/data/SO6/TPOSE/tpose6/nov2012/ITER17/', 17),
          'Jan': ('/data/SO6/TPOSE/tpose6/jan2013/ITER7/', 7),
          'Mar': ('/data/SO6/TPOSE/tpose6/mar2013/ITER4/', 4)}
 SEASONS = ['Sep', 'Nov', 'Jan', 'Mar']
@@ -228,18 +228,19 @@ VIEW_CFG = {  # per-column width, fig height, (hspace, wspace), x-dim
 
 def render(view, var, label, cmap, metric, magnitude, col_labels, V, N, outname,
            unit='units of $\\sigma$'):
+    vname = label.split(' (')[0]  # e.g. 'Initial T (0-300 m)' -> 'Initial T'
     D = {c: V[c] - N[c] for c in col_labels}
     dmax = max(p98(np.abs(D[c].values)) for c in col_labels) or 1e-9
     if magnitude:
         vmax = max(p98(V[c].values) for c in col_labels)
         vmax = max(vmax, max(p98(N[c].values) for c in col_labels), 1e-9)
         row_lim, row_cmap = (0, vmax), cmap
-        top_cb = f'{label} RMS adjustment\n({unit})'
+        top_cb = f'RMS adjustment\n({unit})'
     else:
         amax = max(max(p98(np.abs(V[c].values)), p98(np.abs(N[c].values)))
                    for c in col_labels) or 1e-9
         row_lim, row_cmap = (-amax, amax), DIFF_CMAP
-        top_cb = f'{label} mean adjustment\n({unit})'
+        top_cb = f'mean adjustment\n({unit})'
 
     rows = [('TPOSE-Vel', V, *row_lim, row_cmap),
             ('TPOSE-noVel', N, *row_lim, row_cmap),
@@ -252,7 +253,7 @@ def render(view, var, label, cmap, metric, magnitude, col_labels, V, N, outname,
                            wspace=ws, hspace=hs)
     for r, (rlab, fields, vmin, vmax, cm) in enumerate(rows):
         for c, lab in enumerate(col_labels):
-            args = dict(col_title=lab if r == 0 else None,
+            args = dict(col_title=f'{lab} {vname}' if r == 0 else None,
                         row_label=rlab if c == 0 else None,
                         left=(c == 0), bottom=(r == 2))
             if view == 'map':
@@ -265,7 +266,7 @@ def render(view, var, label, cmap, metric, magnitude, col_labels, V, N, outname,
                   nbins=5, symmetric=not magnitude)
         if r == 2:  # 1 row tall -> fewer ticks
             _cbar(fig, gs[2, nc], DIFF_CMAP, (-dmax, dmax),
-                  f'{label} Vel $-$ noVel\n({unit})',
+                  f'Vel $-$ noVel\n({unit})',
                   nbins=3, symmetric=True)
     out = os.path.join(OUTDIR, outname)
     plt.savefig(out, dpi=150, bbox_inches='tight')
