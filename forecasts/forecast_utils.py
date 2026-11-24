@@ -37,7 +37,12 @@ _TPOSE_NOVEL_OVERRIDES = {
     },
     # nov2012 uses a different diagnostic folder
     ('nov', 2012): {
-        'data_dir': '/data/SO6/TPOSE_diags/tpose6/nov2012/diags_new/',
+        'data_dir': '/data/SO6/TPOSE_diags/tpose6/nov2012/diags_jul2026/',
+        'itPerFile': 72,
+    },
+    # jan2013 noVel moved from averdy's SO3 tree to the SO6 tree
+    ('jan', 2013): {
+        'data_dir': '/data/SO6/TPOSE_diags/tpose6/jan2013/diags_daily/',
         'itPerFile': 72,
     },
 }
